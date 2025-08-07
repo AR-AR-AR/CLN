@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="com.obiscr.chatgpt.settings.EasyCodeState">
+    <option name="projectFiles" value="$PROJECT_DIR$/analysis.py;C:/Users/Andrew/PycharmProjects/TradingDash/auth.py;C:/Users/Andrew/PycharmProjects/TradingDash/callbacks.py;C:/Users/Andrew/PycharmProjects/TradingDash/charts.py;C:/Users/Andrew/PycharmProjects/TradingDash/config.py;C:/Users/Andrew/PycharmProjects/TradingDash/Dashboard.py;C:/Users/Andrew/PycharmProjects/TradingDash/DashNew.py;C:/Users/Andrew/PycharmProjects/TradingDash/data_fetcher.py;C:/Users/Andrew/PycharmProjects/TradingDash/data_processor.py;C:/Users/Andrew/PycharmProjects/TradingDash/layout.py;C:/Users/Andrew/PycharmProjects/TradingDash/main.py;C:/Users/Andrew/PycharmProjects/TradingDash/pinescript.py;C:/Users/Andrew/PycharmProjects/TradingDash/signals.py" />
+  </component>
+</project>
