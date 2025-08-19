@@ -139,11 +139,11 @@ def save_gex_to_csv(gex_df: pd.DataFrame, spot_price: float, vix_data: dict, sym
         return []
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    out_dir = Path('generated') / 'gex_history'
+    out_dir = Path('csv')
     out_dir.mkdir(parents=True, exist_ok=True)
 
     date_tag = datetime.now().strftime('%Y%m%d')
-    daily_path = out_dir / f'{symbol.upper()}_gex_{date_tag}.csv'
+    # daily_path = out_dir / f'{symbol.upper()}_gex_{date_tag}.csv'
     latest_path = out_dir / f'{symbol.upper()}_gex_latest.csv'
 
     df = gex_df.copy()
@@ -154,13 +154,13 @@ def save_gex_to_csv(gex_df: pd.DataFrame, spot_price: float, vix_data: dict, sym
     df.insert(3, 'vix', float(vix_data.get('current', 0.0)))
 
     # Append to daily file (header only once)
-    header_needed = not daily_path.exists()
-    df.to_csv(daily_path, mode='a', index=False, header=header_needed)
+    #header_needed = not daily_path.exists()
+    #df.to_csv(daily_path, mode='a', index=False, header=header_needed)
 
     # Keep a one-file “latest” snapshot (overwrite)
     df.to_csv(latest_path, index=False, header=True)
 
-    return [str(daily_path), str(latest_path)]
+    return [str(latest_path)]
 
 
 def git_add_commit_push(paths: list[str], message: str | None = None, branch: str = 'main') -> None:
