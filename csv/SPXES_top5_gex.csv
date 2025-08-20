@@ -1,0 +1,9 @@
+Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER, DRAW_NOTE_PRICE_HORIZONTAL_LINE
+ESU5.CME@BMD,6463,GEX1,#ffffff,#FF0000,center,2,TRUE
+ESU5.CME@BMD,6488,GEX2,#ffffff,#FF0000,center,2,TRUE
+ESU5.CME@BMD,6513,GEX3,#ffffff,#FF0000,center,2,TRUE
+ESU5.CME@BMD,6483,GEX4,#ffffff,#FF0000,center,2,TRUE
+ESU5.CME@BMD,6503,GEX5,#ffffff,#FF0000,center,2,TRUE
+ESU5.CME@BMD,6463,CALL_WALL,#ffffff,#FF0000,center,2,
+ESU5.CME@BMD,6348,PUT_WALL,#ffffff,#FF0000,center,2,
+ESU5.CME@BMD,6458,MAX_PAIN,#ffffff,#FF0000,center,2,
