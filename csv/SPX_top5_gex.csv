@@ -1,4 +1,4 @@
-Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER, DRAW_NOTE_PRICE_HORIZONTAL_LINE
+Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER,DRAW_NOTE_PRICE_HORIZONTAL_LINE
 ESU5.CME@BMD,6450,GEX1,#ffffff,#FF0000,center,2,TRUE
 ESU5.CME@BMD,6475,GEX2,#ffffff,#FF0000,center,2,TRUE
 ESU5.CME@BMD,6470,GEX3,#ffffff,#FF0000,center,2,TRUE
