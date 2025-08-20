@@ -1,32 +1,38 @@
 #!/usr/bin/env python3
 """
-gex_snapshot_loop_v3.py — Standalone (no CLI args, no Dash).
+gex_snapshot_loop_v5.py — Standalone (no CLI args, no Dash).
+
 - Polls Tastytrade every 5 minutes
-- Computes GEX/DEX/Charm and overwrites latest CSV
-- ALSO writes a second CSV with ONLY the top 5 highest positive GEX levels
-  in the requested "#automap BMD" format; all fields fixed except Price Level & Note.
+- Computes GEX/DEX/Charm on SPX and overwrites the main CSV
+- Builds an "automap" CSV with:
+    * Top 5 positive Net_GEX levels labeled GEX1..GEX5 (highest first)
+    * CALL_WALL (max Call_OI), PUT_WALL (max Put_OI), MAX_PAIN (min OI payout)
+  but prices are mapped to the current ES contract via:
+      ES_level = SPX_level + (ES_last - SPX_spot)
+
+- The automap CSV "Symbol" column uses "<current ES contract>.CME@BMD" (e.g., ESU5.CME@BMD)
+- After writing files, automatically runs: git add → commit → push
 
 Requirements:
   pip install tastytrade pandas numpy
-
 Run:
-  python gex_snapshot_loop_v3.py
-Press Ctrl+C to stop.
+  python gex_snapshot_loop_v5.py
 """
 
 import sys
 import time
 import asyncio
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
 
 from tastytrade import Session, DXLinkStreamer
 from tastytrade.dxfeed import Greeks, Summary
-from tastytrade.market_data import get_market_data
+from tastytrade.market_data import get_market_data, get_market_data_by_type
 from tastytrade.utils import today_in_new_york, is_market_open_on
 from tastytrade.instruments import NestedOptionChain
 from tastytrade.order import InstrumentType
@@ -35,7 +41,7 @@ from tastytrade.order import InstrumentType
 EMAIL = "araseley"          # <-- put your Tastytrade email here
 PASSWORD = "Not_4_you91!"    # <-- put your Tastytrade password here
 
-SYMBOL = "SPX"           # Underlying symbol (e.g., SPX, SPY, ESU5)
+SYMBOL = "SPX"           # Underlying for greeks (SPX index)
 STRIKE_RANGE = 120.0     # +/- strikes around spot
 DTE_LIMIT = 1            # Include expirations with DTE <= this
 TIMEOUT_SECONDS = 15     # Stream snapshot timeout
@@ -44,17 +50,36 @@ OUTDIR = "./csv"         # Output directory
 WRITE_DAILY = False      # Append daily file (SYMBOL_gex_YYYYMMDD.csv)
 WRITE_LATEST = True      # Overwrite latest file (SYMBOL_gex_latest.csv)
 
-# Top-5 automap output config
-AUTOMAP_FILENAME = None  # If None, defaults to f"{SYMBOL.upper()}_top5_gex.csv"
-# Fixed fields (kept same for all rows; only Price Level & Note vary)
+# Automap output config
+AUTOMAP_FILENAME = None  # If None, defaults to f"{ES_CONTRACT}.CME@BMD_top5_gex.csv"
 AUTOMAP_FOREGROUND = "#ffffff"
 AUTOMAP_BACKGROUND = "#FF0000"
 AUTOMAP_TEXT_ALIGN = "center"
 AUTOMAP_DIAMETER = 2
 AUTOMAP_DRAW_HLINE = "TRUE"
 
+# ES contract override (optional). If None, script auto-detects front contract code.
+ES_CONTRACT_OVERRIDE: Optional[str] = "ESU5"   # e.g., "ESU5"
+
 LOOP_INTERVAL_SEC = 300  # 5 minutes
+GIT_BRANCH = "main"      # branch to push
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def current_es_contract_symbol(dt: datetime) -> str:
+    """Return the current ES (E-mini S&P 500) quarterly contract code like 'ESU5'."""
+    # CME quarter codes: Mar=H, Jun=M, Sep=U, Dec=Z
+    month = dt.month
+    year_last = dt.year % 10
+    if month <= 3:
+        code = "H"
+    elif month <= 6:
+        code = "M"
+    elif month <= 9:
+        code = "U"
+    else:
+        code = "Z"
+    return f"ES{code}{year_last}"
 
 
 def fetch_spot_and_vix(session: Session, symbol: str) -> Tuple[float, Dict[str, float]]:
@@ -67,13 +92,11 @@ def fetch_spot_and_vix(session: Session, symbol: str) -> Tuple[float, Dict[str, 
         vix_current = float(vix_mdata.last)
     except Exception:
         vix_current = 20.0
-
     try:
         vix9d_mdata = get_market_data(session, "VIX9D", InstrumentType.INDEX)
         vix9d = float(vix9d_mdata.last)
     except Exception:
         vix9d = vix_current * 0.95
-
     try:
         vix3m_mdata = get_market_data(session, "VIX3M", InstrumentType.INDEX)
         vix3m = float(vix3m_mdata.last)
@@ -88,6 +111,18 @@ def fetch_spot_and_vix(session: Session, symbol: str) -> Tuple[float, Dict[str, 
         "short_term_premium": (vix_current / vix9d) if vix9d else 1.0,
     }
     return spot_price, vix_data
+
+
+def fetch_es_price(session: Session, override: Optional[str] = None) -> Tuple[str, float]:
+    """
+    Return (es_contract_code, last_price) for ES.
+    If override is provided, use it; else derive from today's date.
+    """
+    contract = override or current_es_contract_symbol(datetime.now())
+    # Tastytrade futures symbol is typically like 'ESU5'
+    m = get_market_data_by_type(session, futures=["/"+contract])
+    #m = get_market_data(session, contract, InstrumentType.FUTURE)
+    return contract, float(m[0].last)
 
 
 def build_option_subs(session: Session, symbol: str, spot: float, strike_range: float, dte_limit: int) -> Tuple[List[str], pd.DataFrame]:
@@ -112,11 +147,10 @@ def build_option_subs(session: Session, symbol: str, spot: float, strike_range: 
                             "dte": exp.days_to_expiration,
                         }
                     )
-
     return subs_list, pd.DataFrame(rows)
 
 
-async def _collect_greeks(streamer: DXLinkStreamer, greeks_out: Dict[str, Dict], subs: List[str], timeout: int):
+async def _collect_greeks(streamer: DXLinkStreamer, greeks_out: Dict[str, Dict], timeout: int):
     async def _listen():
         async for event in streamer.listen(Greeks):
             greeks_out[event.event_symbol] = {
@@ -127,11 +161,10 @@ async def _collect_greeks(streamer: DXLinkStreamer, greeks_out: Dict[str, Dict],
                 "theta": float(event.theta or 0.0),
                 "iv": float(event.volatility or 0.0),
             }
-            # Let timeout govern; no forced break (reduces generator exit warnings)
     await asyncio.wait_for(_listen(), timeout=timeout)
 
 
-async def _collect_summary(streamer: DXLinkStreamer, summary_out: Dict[str, Dict], subs: List[str], timeout: int):
+async def _collect_summary(streamer: DXLinkStreamer, summary_out: Dict[str, Dict], timeout: int):
     async def _listen():
         async for event in streamer.listen(Summary):
             oi = event.open_interest
@@ -143,7 +176,6 @@ async def _collect_summary(streamer: DXLinkStreamer, summary_out: Dict[str, Dict
                 "symbol": event.event_symbol,
                 "open_interest": oi_val,
             }
-            # Let timeout govern; no forced break
     await asyncio.wait_for(_listen(), timeout=timeout)
 
 
@@ -155,25 +187,21 @@ def stream_snapshot(session: Session, subs: List[str], timeout: int) -> Tuple[Di
         async with DXLinkStreamer(session) as streamer:
             await streamer.subscribe(Greeks, subs)
             await streamer.subscribe(Summary, subs)
-
             async def run_g():
                 try:
-                    await _collect_greeks(streamer, greeks_data, subs, timeout)
+                    await _collect_greeks(streamer, greeks_data, timeout)
                 except asyncio.TimeoutError:
                     pass
-
             async def run_s():
                 try:
-                    await _collect_summary(streamer, summary_data, subs, timeout)
+                    await _collect_summary(streamer, summary_data, timeout)
                 except asyncio.TimeoutError:
                     pass
-
             await asyncio.gather(run_g(), run_s())
 
     try:
         asyncio.run(_runner())
     except RuntimeError:
-        # Fallback if already inside an event loop
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(_runner())
@@ -199,12 +227,10 @@ def process_exposures(greeks: Dict[str, Dict], summary: Dict[str, Dict], options
     for col in ["delta", "gamma", "vega", "theta", "iv"]:
         if col in df_g.columns:
             df_g[col] = pd.to_numeric(df_g[col], errors="coerce").fillna(0.0).astype(float)
-
     if "open_interest" not in df_s.columns:
         df_s["open_interest"] = 0.0
     else:
         df_s["open_interest"] = pd.to_numeric(df_s["open_interest"], errors="coerce").fillna(0.0).astype(float)
-
     df_o["strike"] = pd.to_numeric(df_o["strike"], errors="coerce").astype(float)
 
     # Merge Summary into Greeks first so OI is always present
@@ -259,60 +285,113 @@ def save_main_csv(gex_df: pd.DataFrame, spot: float, vix: Dict[str, float], symb
     df.insert(3, "vix", float(vix.get("current", 0.0)))
 
     written = []
-
     if write_latest:
         latest_path = outdir / f"{symbol.upper()}_gex_latest.csv"
         df.to_csv(latest_path, index=False)
         written.append(latest_path)
-
     if write_daily:
         date_tag = datetime.now().strftime("%Y%m%d")
         daily_path = outdir / f"{symbol.upper()}_gex_{date_tag}.csv"
         header_needed = not daily_path.exists()
         df.to_csv(daily_path, mode="a", index=False, header=header_needed)
         written.append(daily_path)
-
     return written
 
 
-def save_top5_automap(gex_df: pd.DataFrame, symbol: str, outdir: Path) -> Path:
-    """
-    Save ONLY the top 5 highest positive Net_GEX levels into a CSV with this format:
+def call_wall_put_wall_from_oi(gex_df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+    """Return (call_wall_strike, put_wall_strike) using max Call_OI and max Put_OI (fallback to GEX if OI missing)."""
+    call_wall = None
+    put_wall = None
+    if "Call_OI" in gex_df.columns and gex_df["Call_OI"].sum() > 0:
+        call_wall = float(gex_df.loc[gex_df["Call_OI"].idxmax(), "strike"])
+    elif "Call_GEX" in gex_df.columns and gex_df["Call_GEX"].abs().sum() > 0:
+        call_wall = float(gex_df.loc[gex_df["Call_GEX"].idxmax(), "strike"])
+    if "Put_OI" in gex_df.columns and gex_df["Put_OI"].sum() > 0:
+        put_wall = float(gex_df.loc[gex_df["Put_OI"].idxmax(), "strike"])
+    elif "Put_GEX" in gex_df.columns and gex_df["Put_GEX"].abs().sum() > 0:
+        put_wall = float(gex_df.loc[gex_df["Put_GEX"].idxmax(), "strike"])
+    return call_wall, put_wall
 
-    First line:
-        #automap BMD
-    Then header row:
-        Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER, DRAW_NOTE_PRICE_HORIZONTAL_LINE
-    Then rows (fixed fields except Price Level and Note). Note includes the price and GEX value.
+
+def max_pain_from_oi(gex_df: pd.DataFrame) -> Optional[float]:
+    """
+    Max Pain on strike grid by minimizing OI payout:
+      payout(P) = sum(Call_OI_i * max(0, P - K_i)) + sum(Put_OI_i * max(0, K_i - P))
+    Returns strike P with minimal payout or None.
+    """
+    need = {"strike", "Call_OI", "Put_OI"}
+    if not need.issubset(gex_df.columns):
+        return None
+    strikes = gex_df["strike"].to_numpy(dtype=float)
+    call_oi = gex_df["Call_OI"].to_numpy(dtype=float)
+    put_oi = gex_df["Put_OI"].to_numpy(dtype=float)
+    if (np.nansum(call_oi) == 0) and (np.nansum(put_oi) == 0):
+        return None
+    payouts = []
+    for P in strikes:
+        call_pay = np.sum(call_oi * np.maximum(0.0, P - strikes))
+        put_pay = np.sum(put_oi * np.maximum(0.0, strikes - P))
+        payouts.append(call_pay + put_pay)
+    idx = int(np.nanargmin(payouts))
+    return float(strikes[idx])
+
+
+def save_top5_automap(
+    gex_df: pd.DataFrame,
+    es_contract: str,
+    es_offset: float,
+    outdir: Path
+) -> Path:
+    """
+    Save top 5 positive Net_GEX + CALL_WALL / PUT_WALL / MAX_PAIN mapped to ES via `es_offset`.
+    Price Level written as: round(SPX_level + es_offset) with 0 decimals.
+    Symbol: f"{es_contract}.CME@BMD"
     """
     outdir.mkdir(parents=True, exist_ok=True)
-    fname = AUTOMAP_FILENAME or f"{symbol.upper()}_top5_gex.csv"
+    display_symbol = f"{es_contract}.CME@BMD"
+    fname = AUTOMAP_FILENAME or f"SPXES_top5_gex.csv"
     path = outdir / fname
 
+    rows: List[Dict] = []
+
+    # Top 5 positive Net_GEX (highest first)
     pos = gex_df[gex_df["Net_GEX"] > 0].copy()
-    if pos.empty:
-        with open(path, "w", newline="") as f:
-            f.write("#automap BMD\n")
-            f.write("Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER, DRAW_NOTE_PRICE_HORIZONTAL_LINE\n")
-        return path
-
-    top5 = pos.sort_values("Net_GEX", ascending=False).head(5).copy()
-
-    rows = []
-    for _, r in top5.iterrows():
-        strike = float(r["strike"])
-        gex_val = float(r["Net_GEX"])
-        note = f"Price {strike:.0f} | GEX {gex_val:,.0f}"
+    pos = pos.sort_values("Net_GEX", ascending=False).head(5)
+    for i, (_, r) in enumerate(pos.iterrows(), start=1):
+        spx_level = float(r["strike"])
+        es_level = spx_level + es_offset
         rows.append({
-            "Symbol": symbol.upper(),
-            "Price Level": f"{strike:.0f}",  # keep as integer-like string
-            "Note": note,
+            "Symbol": display_symbol,
+            "Price Level": f"{es_level:.0f}",
+            "Note": f"GEX{i}",
             "Foreground Color": AUTOMAP_FOREGROUND,
             "Background Color": AUTOMAP_BACKGROUND,
             "Text Alignment": AUTOMAP_TEXT_ALIGN,
             "DIAMETER": AUTOMAP_DIAMETER,
             " DRAW_NOTE_PRICE_HORIZONTAL_LINE": AUTOMAP_DRAW_HLINE,
         })
+
+    # Walls & Max Pain (compute on SPX grid, then map to ES)
+    cw, pw = call_wall_put_wall_from_oi(gex_df)
+    mp = max_pain_from_oi(gex_df)
+
+    def add_row_if_finite(spx_price: Optional[float], label: str):
+        if spx_price is not None and np.isfinite(spx_price):
+            es_price = float(spx_price) + es_offset
+            rows.append({
+                "Symbol": display_symbol,
+                "Price Level": f"{es_price:.0f}",
+                "Note": label,
+                "Foreground Color": AUTOMAP_FOREGROUND,
+                "Background Color": AUTOMAP_BACKGROUND,
+                "Text Alignment": AUTOMAP_TEXT_ALIGN,
+                "DIAMETER": AUTOMAP_DIAMETER,
+                "DRAW_NOTE_PRICE_HORIZONTAL_LINE": AUTOMAP_DRAW_HLINE,
+            })
+
+    add_row_if_finite(cw, "CALL_WALL")
+    add_row_if_finite(pw, "PUT_WALL")
+    add_row_if_finite(mp, "MAX_PAIN")
 
     out_df = pd.DataFrame(rows, columns=[
         "Symbol",
@@ -325,12 +404,37 @@ def save_top5_automap(gex_df: pd.DataFrame, symbol: str, outdir: Path) -> Path:
         " DRAW_NOTE_PRICE_HORIZONTAL_LINE",
     ])
 
-    # Write with the required first line
     with open(path, "w", newline="") as f:
-        f.write("#automap BMD\n")
+        #f.write("#automap BMD\n")
         out_df.to_csv(f, index=False)
 
     return path
+
+
+def git_add_commit_push(paths: List[Path], message: Optional[str] = None, branch: str = GIT_BRANCH) -> None:
+    """git add/commit/push in the repo containing this script."""
+    if not paths:
+        return
+    repo_dir = Path(__file__).resolve().parent
+    # Convert to relative paths (nicer in git)
+    rels = []
+    for p in paths:
+        try:
+            rels.append(str(Path(p).resolve().relative_to(repo_dir)))
+        except Exception:
+            rels.append(str(p))
+
+    commit_msg = message or f"Update snapshots {datetime.now():%Y-%m-%d %H:%M:%S}"
+    try:
+        subprocess.run(["git", "add", *rels], cwd=repo_dir, check=True)
+        commit_proc = subprocess.run(["git", "commit", "-m", commit_msg], cwd=repo_dir)
+        if commit_proc.returncode != 0:
+            # likely nothing to commit
+            return
+        subprocess.run(["git", "push", "origin", branch], cwd=repo_dir, check=True)
+    except Exception as e:
+        # Non-fatal: print and continue
+        print(f"[git] push skipped: {e}", file=sys.stderr, flush=True)
 
 
 def one_cycle() -> bool:
@@ -345,15 +449,23 @@ def one_cycle() -> bool:
         return False
 
     try:
-        spot, vix_data = fetch_spot_and_vix(session, SYMBOL)
+        spx_spot, vix_data = fetch_spot_and_vix(session, SYMBOL)
     except Exception as e:
-        print(f"[{datetime.now():%H:%M:%S}] Failed to fetch spot/VIX: {e}", file=sys.stderr, flush=True)
+        print(f"[{datetime.now():%H:%M:%S}] Failed to fetch SPX/VIX: {e}", file=sys.stderr, flush=True)
         return False
 
     try:
-        subs, opt_df = build_option_subs(session, SYMBOL, spot, STRIKE_RANGE, DTE_LIMIT)
+        es_contract, es_last = fetch_es_price(session, ES_CONTRACT_OVERRIDE)
+    except Exception as e:
+        print(f"[{datetime.now():%H:%M:%S}] Failed to fetch ES price: {e}", file=sys.stderr, flush=True)
+        return False
+
+    es_offset = es_last - spx_spot  # map SPX levels to ES via additive offset
+
+    try:
+        subs, opt_df = build_option_subs(session, SYMBOL, spx_spot, STRIKE_RANGE, DTE_LIMIT)
         if not subs:
-            print(f"[{datetime.now():%H:%M:%S}] No option symbols matched filters.", file=sys.stderr, flush=True)
+            print(f"[{datetime.now():%H:%M:%S}] No SPX option symbols matched filters.", file=sys.stderr, flush=True)
             return False
     except Exception as e:
         print(f"[{datetime.now():%H:%M:%S}] Failed to build option subs: {e}", file=sys.stderr, flush=True)
@@ -367,25 +479,27 @@ def one_cycle() -> bool:
 
     outdir = Path(OUTDIR)
 
-    # 1) Save the main snapshot(s)
-    written_paths = save_main_csv(gex_df, spot, vix_data, SYMBOL, outdir, WRITE_LATEST or not WRITE_DAILY, WRITE_DAILY)
-    if not written_paths:
-        print(f"[{datetime.now():%H:%M:%S}] Nothing written (main CSV).", file=sys.stderr, flush=True)
-        return False
+    # 1) Save the main SPX snapshot(s)
+    main_paths = save_main_csv(gex_df, spx_spot, vix_data, SYMBOL, outdir, WRITE_LATEST or not WRITE_DAILY, WRITE_DAILY)
 
-    # 2) Save the top-5 automap file
-    top5_path = save_top5_automap(gex_df, SYMBOL, outdir)
+    # 2) Save the automap file (mapped to ES) and git push both
+    automap_path = save_top5_automap(gex_df, es_contract, es_offset, outdir)
 
     flip_idx = gex_df["Cumulative_GEX"].abs().idxmin()
     flip_strike = float(gex_df.loc[flip_idx, "strike"])
+
     print(
-        f"[{datetime.now():%H:%M:%S}] Wrote {len(written_paths)} main file(s) "
-        f"+ top-5 automap at {top5_path.resolve()}. "
-        f"Spot={spot:.2f} VIX={vix_data['current']:.2f} Flip={flip_strike:.2f}",
+        f"[{datetime.now():%H:%M:%S}] SPX spot={spx_spot:.2f} ES({es_contract})={es_last:.2f} "
+        f"offset={es_offset:+.2f} | Flip={flip_strike:.0f}",
         flush=True
     )
-    for p in written_paths:
-        print(f"  -> {p.resolve()}", flush=True)
+    for p in main_paths:
+        print(f"  -> wrote {p.resolve()}", flush=True)
+    print(f"  -> wrote {automap_path.resolve()}", flush=True)
+
+    # Git add/commit/push
+    git_add_commit_push([*main_paths, automap_path], message=f"{es_contract} automap + SPX GEX {datetime.now():%Y-%m-%d %H:%M:%S}")
+
     return True
 
 
@@ -412,6 +526,6 @@ def main_loop():
 
 if __name__ == "__main__":
     if "YOUR_TASTY_EMAIL" in EMAIL or "YOUR_TASTY_PASSWORD" in PASSWORD:
-        print("ERROR: Edit EMAIL/PASSWORD at the top of gex_snapshot_loop_v3.py before running.", file=sys.stderr)
+        print("ERROR: Edit EMAIL/PASSWORD at the top of gex_snapshot_loop_v5.py before running.", file=sys.stderr)
         sys.exit(2)
     main_loop()

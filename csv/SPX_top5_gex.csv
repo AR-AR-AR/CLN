@@ -1,7 +1,10 @@
 #automap BMD
 Symbol,Price Level,Note,Foreground Color,Background Color,Text Alignment,DIAMETER, DRAW_NOTE_PRICE_HORIZONTAL_LINE
-SPX,6450,Price 6450 | GEX 449,#ffffff,#FF0000,center,2,TRUE
-SPX,6475,Price 6475 | GEX 326,#ffffff,#FF0000,center,2,TRUE
-SPX,6470,Price 6470 | GEX 170,#ffffff,#FF0000,center,2,TRUE
-SPX,6500,Price 6500 | GEX 155,#ffffff,#FF0000,center,2,TRUE
-SPX,6490,Price 6490 | GEX 133,#ffffff,#FF0000,center,2,TRUE
+SPX,6450,GEX1,#ffffff,#FF0000,center,2,TRUE
+SPX,6475,GEX2,#ffffff,#FF0000,center,2,TRUE
+SPX,6470,GEX3,#ffffff,#FF0000,center,2,TRUE
+SPX,6500,GEX4,#ffffff,#FF0000,center,2,TRUE
+SPX,6490,GEX5,#ffffff,#FF0000,center,2,TRUE
+SPX,6450,CALL_WALL,#ffffff,#FF0000,center,2,TRUE
+SPX,6335,PUT_WALL,#ffffff,#FF0000,center,2,TRUE
+SPX,6445,MAX_PAIN,#ffffff,#FF0000,center,2,TRUE
